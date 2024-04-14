@@ -1,0 +1,161 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Update.h>
+#include <FS.h>  // Include the file system library
+#include <SPIFFS.h>
+
+
+const char* host = "esp32";
+const char* ssid = "Home";
+const char* password = "9503297281";
+
+const int CURRENT_FIRMWARE_VERSION = 71289;  // Change this to your current firmware version
+
+File firmwareFile;
+
+WebServer server(80);
+
+/*
+ * Server Index Page
+ */
+String serverIndex =
+  "<form method='POST' action='/update' enctype='multipart/form-data'>"
+  "<h1>esp32 ota update<h1>"
+  "<h2>cureent firmware version = Version "+ String(CURRENT_FIRMWARE_VERSION) +"</h5>" 
+  "<input type='file' name='update'>"
+  "<input type='submit' value='Update'>"
+  "</form>"
+  "<h1>status <h1>" "<div id='result'></div>"
+  "<h1>version <h1>""<div id='version'></div>"
+  "<script>"
+  "window.onload = function() {"
+  "var urlParams = new URLSearchParams(window.location.search);"
+  "var result = urlParams.get('result');"
+  "var version = urlParams.get('version');"
+
+  "if (result) {"
+  "document.getElementById('result').innerText = result;"
+  "}"
+  "if (version) {"
+  "document.getElementById('version').innerText = version;"
+  "}"
+  "};"
+  "</script>";
+
+/*
+ * setup function
+ */
+void setup(void) {
+  Serial.begin(115200);
+
+  // Connect to WiFi network
+  WiFi.begin(ssid, password);
+  Serial.println("");
+
+  // Wait for connection
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS initialization failed!");
+    return;
+  }
+  Serial.println("SPIFFS initialized successfully");
+
+
+
+
+  // Set up route for serving the server index page
+  server.on("/serverIndex", HTTP_GET, []() {
+    server.send(200, "text/html", serverIndex);
+  });
+
+
+  // Handling firmware update
+  server.on(
+    "/update", HTTP_POST, []() {
+      server.send(200, "text/plain", (Update.hasError()) ? "FAIL_TO_UPDATE" : "UPDATED");
+      ESP.restart();  // Restart ESP32 after update
+    },
+    []() {
+      HTTPUpload& upload = server.upload();
+      if (upload.status == UPLOAD_FILE_START) {
+        Serial.println("Firmware update started");
+        if (!Update.begin()) {
+          Serial.println("Failed to start firmware update");
+        }
+      } else if (upload.status == UPLOAD_FILE_WRITE) {
+        Serial.printf("Writing %d bytes\n", upload.currentSize);
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+          Serial.println("Write error during firmware upload");
+        }
+      } else if (upload.status == UPLOAD_FILE_END) {
+
+        Serial.printf("Writing %d bytes\n", upload.currentSize);
+        int lastInt = getLastIntegerFromBuffer(upload.buf, upload.currentSize);
+        Serial.print("Last integer from buffer: ");
+        Serial.println(lastInt);
+
+        Serial.print("Current firmware version: ");
+        Serial.println(CURRENT_FIRMWARE_VERSION);
+
+        if (lastInt == CURRENT_FIRMWARE_VERSION) {
+          if (Update.end(true)) {
+            Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+            server.sendHeader("Location", "/serverIndex?result=updated&version=" + String(lastInt));
+            server.send(303);
+          } else {
+            Serial.printf("\nhere 13");
+            Update.printError(Serial);
+            // Redirect to serverIndex page with update status
+            server.sendHeader("Location", "/serverIndex?result=update_failed");
+            Serial.printf("\nhere 14");
+            server.send(303);
+          }
+        } else {
+
+          Serial.printf("\nhere 10");
+          Serial.println("Uploaded firmware version is not same. Aborting update.");
+          Update.abort();
+          // Redirect to serverIndex page with update status
+          Serial.printf("\nhere 11");
+          server.sendHeader("Location", "/serverIndex?result=failed&version=" + String(lastInt));
+          Serial.printf("\nhere 12");
+          server.send(303);
+        }
+      }
+    });
+  Serial.printf("\nhere 15");
+  server.begin();
+}
+
+void loop(void) {
+  server.handleClient();
+}
+
+int getLastIntegerFromBuffer(uint8_t* buf, size_t size) {
+  if (!buf || size < 4) {
+    return -1;  // Return -1 if buffer is empty or smaller than 4 bytes
+  }
+
+  // Calculate the starting position of the last four bytes
+  int startPos = size - 4;
+
+  // Read the last four bytes from the buffer
+  uint32_t lastFourBytes = 0;
+  for (int i = 0; i < 4; i++) {
+    lastFourBytes |= static_cast<uint32_t>(buf[startPos + i]) << (i * 8);
+  }
+
+  // Convert the four bytes to decimal integer
+  return static_cast<int>(lastFourBytes);
+}
